@@ -4,6 +4,44 @@ export function lineStartOf(text: string, index: number) {
  return index <= 0 ? 0 : text.lastIndexOf('\n', index - 1) + 1;
 }
 
+const CLOSERS: Record<string, string> = { '{': '}', '(': ')', '[': ']' };
+const VOID_TAG = /^(area|base|br|col|embed|hr|img|input|link|meta|source|track|wbr)$/i;
+
+/**
+ * Dipanggil setelah teks berubah (bukan dari keydown, karena keyboard Android sering kirim key "Unidentified").
+ * Kalau yang baru diketik 1 karakter Enter -> sisipkan indent; kalau 1 karakter penutup } ) ] di baris kosong -> outdent.
+ * null = tidak ada yang perlu diubah.
+ */
+export function smartIndent(old: string, value: string, pos: number, language = ''): { value: string; caret: number } | null {
+ if (pos < 1 || value.length !== old.length + 1 || value.slice(0, pos - 1) + value.slice(pos) !== old) return null;
+ const unit = language === 'Python' ? '    ' : '  ';
+ const typed = value[pos - 1];
+ const before = value.slice(0, pos - 1);
+ const after = value.slice(pos);
+ const lineStart = lineStartOf(before, before.length);
+ const line = before.slice(lineStart);
+ if (typed === '\n') {
+  const indent = line.match(/^[ \t]*/)?.[0] ?? '';
+  const trimmed = line.trimEnd();
+  const last = trimmed.slice(-1);
+  const tag = trimmed.match(/<([a-zA-Z][\w-]*)(?:\s[^<>]*)?>$/);
+  const opensTag = !!tag && !VOID_TAG.test(tag[1]) && !trimmed.endsWith('/>');
+  const opens = last in CLOSERS || opensTag || (language === 'Python' && last === ':');
+  const closesNext = (last in CLOSERS && after[0] === CLOSERS[last]) || (opensTag && after.startsWith('</'));
+  if (opens && closesNext) {
+   const head = before + '\n' + indent + unit;
+   return { value: head + '\n' + indent + after, caret: head.length };
+  }
+  const ins = '\n' + indent + (opens ? unit : '');
+  return { value: before + ins + after, caret: before.length + ins.length };
+ }
+ if ('}])'.includes(typed) && /^[ \t]+$/.test(line) && line.endsWith(unit)) {
+  const head = before.slice(0, lineStart) + line.slice(0, line.length - unit.length) + typed;
+  return { value: head + after, caret: head.length };
+ }
+ return null;
+}
+
 // Jembatan console iframe -> parent (dipasang paling awal di <head>).
 const BRIDGE = '<script>(function(){function s(k,a){try{parent.postMessage({src:"kode-preview",k:k,t:Array.prototype.map.call(a,function(x){try{return typeof x==="string"?x:JSON.stringify(x)}catch(e){return String(x)}}).join(" ")},"*")}catch(e){}}'
  + '["log","info","warn","error"].forEach(function(m){var o=console[m];console[m]=function(){s(m==="error"||m==="warn"?"err":"out",arguments);o.apply(console,arguments)}});'

@@ -1,8 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { ArrowDown, ArrowUp, ArrowUpRight, Bell, Braces, Check, ChevronDown, ChevronRight, ChevronsLeftRight, Code2, Download, Ellipsis, FilePlus2, Files, Folder, GitBranch, Keyboard, PanelLeftClose, Pencil, Play, Plus, Puzzle, RefreshCw, Search, Settings2, Sparkles, Terminal, Trash2, Undo2, X, CircleAlert, CircleX } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { files, fileMeta, languages, plugins, type FileItem } from './editor-data';
-import { buildPreview, lineStartOf, runInWorker } from './workspace-logic';
+import { buildPreview, lineStartOf, runInWorker, smartIndent } from './workspace-logic';
 
 type View = 'editor' | 'files' | 'search' | 'plugins' | 'settings' | 'preview';
 type TermLine = { kind: 'in' | 'out' | 'err'; text: string };
@@ -53,6 +53,7 @@ export function CodeWorkspace() {
  const cmdHistory = useRef<string[]>([]);
  const cmdIndex = useRef(0);
  const activeFile = fileList.find(f => f.name === activeName);
+ const indentUnit = activeFile?.language === 'Python' ? '    ' : '  ';
  const previewDoc = useMemo(() => (view === 'preview' ? buildPreview(fileList) : ''), [view, fileList, previewKey]);
 
  // Muat file tersimpan (setelah mount supaya SSR tidak mismatch)
@@ -145,19 +146,20 @@ export function CodeWorkspace() {
   }
   el.focus(); el.setSelectionRange(target, target); updateCursor(el);
  }
+ function onEditorChange(e: ChangeEvent<HTMLTextAreaElement>) {
+  const value = e.target.value; const pos = e.target.selectionStart;
+  const res = autoIndent && activeFile ? smartIndent(activeFile.content, value, pos, activeFile.language) : null;
+  if (!res) { setContent(value); return; }
+  setContent(res.value, pos - 1);
+  pendingSel.current = [res.caret, res.caret];
+ }
  function onEditorKey(e: ReactKeyboardEvent<HTMLTextAreaElement>) {
+  if (e.key !== 'Tab') return;
+  e.preventDefault();
   const el = e.currentTarget; const v = el.value; const s = el.selectionStart; const en = el.selectionEnd;
-  if (e.key === 'Tab') {
-   e.preventDefault();
-   if (!e.shiftKey) { edit(v.slice(0, s) + '  ' + v.slice(en), s + 2); return; }
-   const ls = lineStartOf(v, s); const n = v.slice(ls).match(/^ {1,2}/)?.[0].length ?? 0;
-   if (n) edit(v.slice(0, ls) + v.slice(ls + n), Math.max(ls, s - n), Math.max(ls, en - n));
-  } else if (e.key === 'Enter' && autoIndent) {
-   e.preventDefault();
-   const indent = v.slice(lineStartOf(v, s), s).match(/^[ \t]*/)?.[0] ?? '';
-   const ins = '\n' + indent + ('{(['.includes(v[s - 1] ?? 'x') ? '  ' : '');
-   edit(v.slice(0, s) + ins + v.slice(en), s + ins.length);
-  }
+  if (!e.shiftKey) { edit(v.slice(0, s) + indentUnit + v.slice(en), s + indentUnit.length); return; }
+  const ls = lineStartOf(v, s); const n = v.slice(ls).match(new RegExp(`^ {1,${indentUnit.length}}`))?.[0].length ?? 0;
+  if (n) edit(v.slice(0, ls) + v.slice(ls + n), Math.max(ls, s - n), Math.max(ls, en - n));
  }
 
  // ---- File manager ----
@@ -212,7 +214,7 @@ export function CodeWorkspace() {
   if (confirmDel !== name) { setConfirmDel(name); setNotice(`Tap ikon hapus sekali lagi untuk menghapus ${name}.`); return; }
   const err = removeFile(name); setConfirmDel(null); setNotice(err || `${name} dihapus.`);
  }
- const nameForm = <div className="flex items-center gap-1 px-3 py-1"><input autoFocus className="panel-search" style={{ marginBottom: 0, height: 32 }} placeholder="nama-file.ext" aria-label="Nama file" value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submitName(); if (e.key === 'Escape') setNaming(null); }} /><IconButton label="Simpan nama" onClick={submitName}><Check size={14} /></IconButton><IconButton label="Batal" onClick={() => setNaming(null)}><X size={14} /></IconButton></div>;
+ const nameForm = <form className="flex items-center gap-1 px-3 py-1" onSubmit={e => { e.preventDefault(); submitName(); }}><input autoFocus className="panel-search" style={{ marginBottom: 0, height: 32 }} placeholder="nama-file.ext" aria-label="Nama file" enterKeyHint="done" autoCapitalize="off" autoCorrect="off" autoComplete="off" value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') setNaming(null); }} /><IconButton label="Simpan nama" onClick={submitName}><Check size={14} /></IconButton><IconButton label="Batal" onClick={() => setNaming(null)}><X size={14} /></IconButton></form>;
  const fileRows = (list: FileItem[]) => <>
   {naming?.mode === 'new' && nameForm}
   {list.map(file => naming?.mode === 'rename' && naming.from === file.name ? <div key={file.name}>{nameForm}</div> : <div key={file.name} className="flex items-center">
@@ -259,13 +261,15 @@ export function CodeWorkspace() {
   }
   setTerm(t => [...t, ...out]);
  }
+ function submitCommand() {
+  const h = cmdHistory.current; const line = command.trim();
+  runCommand(command);
+  if (line) h.push(line);
+  cmdIndex.current = h.length; setCommand('');
+ }
  function onTerminalKey(e: ReactKeyboardEvent<HTMLInputElement>) {
   const h = cmdHistory.current;
-  if (e.key === 'Enter') {
-   runCommand(command);
-   if (command.trim()) h.push(command.trim());
-   cmdIndex.current = h.length; setCommand('');
-  } else if (e.key === 'ArrowUp') {
+  if (e.key === 'ArrowUp') {
    e.preventDefault();
    if (cmdIndex.current > 0) { cmdIndex.current--; setCommand(h[cmdIndex.current] ?? ''); }
   } else if (e.key === 'ArrowDown') {
@@ -298,9 +302,9 @@ export function CodeWorkspace() {
      {activeFile && <div className="breadcrumbs"><span>bloom-project</span><ChevronRight /><span className={`file-badge ${activeFile.type}`}>{activeFile.badge}</span><span className="current">{activeFile.name}</span><ChevronRight /><Braces /><span>{activeFile.language}</span></div>}
      <div className="editor-area"><div className="code-scroll">{activeFile ? <div className="code-lines" style={wrap ? { minWidth: 0 } : undefined}><div className="relative" style={wrap ? undefined : { width: 'max-content', minWidth: '100%' }}>
       {lines.map((line, i) => <div className={`code-line ${i + 1 === cursor.ln ? 'current' : ''}`} key={i} style={wrap ? { whiteSpace: 'pre-wrap' } : undefined}><span className="line-number">{i + 1}</span><div className="code-content" style={wrap ? { whiteSpace: 'pre-wrap', overflowWrap: 'break-word', minWidth: 0 } : undefined}>{highlighted(line)}</div></div>)}
-      <textarea ref={taRef} key={activeFile.name} value={activeFile.content} spellCheck={false} autoCapitalize="off" autoCorrect="off" wrap={wrap ? 'soft' : 'off'} aria-label={`Editor ${activeFile.name}`} onChange={e => setContent(e.target.value)} onKeyDown={onEditorKey} onSelect={e => updateCursor(e.currentTarget)} onScroll={e => { e.currentTarget.scrollLeft = 0; e.currentTarget.scrollTop = 0; }} className="absolute resize-none overflow-hidden bg-transparent outline-none" style={{ top: 0, bottom: 0, left: 62, right: 0, padding: '0 25px 0 0', margin: 0, border: 0, color: 'transparent', WebkitTextFillColor: 'transparent', caretColor: 'var(--foreground)', font: 'inherit', lineHeight: 'inherit', tabSize: 2, whiteSpace: wrap ? 'pre-wrap' : 'pre', overflowWrap: 'break-word' }} />
+      <textarea ref={taRef} key={activeFile.name} value={activeFile.content} spellCheck={false} autoCapitalize="off" autoCorrect="off" autoComplete="off" wrap={wrap ? 'soft' : 'off'} aria-label={`Editor ${activeFile.name}`} onChange={onEditorChange} onKeyDown={onEditorKey} onSelect={e => updateCursor(e.currentTarget)} onScroll={e => { e.currentTarget.scrollLeft = 0; e.currentTarget.scrollTop = 0; }} className="code-input" style={wrap ? { whiteSpace: 'pre-wrap' } : undefined} />
      </div></div> : <div className="p-8 text-muted-foreground">No open files</div>}</div><div className="minimap" aria-hidden="true">{Array.from({ length: 35 }, (_, i) => <div className="minimap-line" key={i} />)}</div></div>
-     <div className="shortcut-bar" onMouseDown={e => e.preventDefault()}><Button variant="ghost" className="shortcut-key" title="Indent" onClick={() => insertAtCursor('  ')}><ArrowUpRight />Tab</Button>{SHORTCUTS.map(([label, text, back]) => <Button variant="ghost" className="shortcut-key" key={label} onClick={() => insertAtCursor(text, back)}>{label}</Button>)}<Button variant="ghost" className="shortcut-key" title="Undo" onClick={undo}><Undo2 /></Button><Button variant="ghost" className="shortcut-key" title="Move cursor up" onClick={() => moveLine(-1)}><ArrowUp /></Button><Button variant="ghost" className="shortcut-key" title="Move cursor down" onClick={() => moveLine(1)}><ArrowDown /></Button></div>
+     <div className="shortcut-bar" onMouseDown={e => e.preventDefault()}><Button variant="ghost" className="shortcut-key" title="Indent" onClick={() => insertAtCursor(indentUnit)}><ArrowUpRight />Tab</Button>{SHORTCUTS.map(([label, text, back]) => <Button variant="ghost" className="shortcut-key" key={label} onClick={() => insertAtCursor(text, back)}>{label}</Button>)}<Button variant="ghost" className="shortcut-key" title="Undo" onClick={undo}><Undo2 /></Button><Button variant="ghost" className="shortcut-key" title="Move cursor up" onClick={() => moveLine(-1)}><ArrowUp /></Button><Button variant="ghost" className="shortcut-key" title="Move cursor down" onClick={() => moveLine(1)}><ArrowDown /></Button></div>
     </> : <div className="content-panel">
      {view === 'files' && <><div className="flex items-center justify-between"><h1>Explorer</h1><Button variant="secondary" className="h-8 text-xs" onClick={startNew}><FilePlus2 size={14} />New file</Button></div><p className="description">bloom-project</p><div className="panel-files">{fileRows(fileList)}</div></>}
      {view === 'search' && <><h1>Search</h1><p className="description">bloom-project</p><input className="panel-search" placeholder="Search files…" aria-label="Search files" value={query} onChange={e => setQuery(e.target.value)} autoFocus /><div className="panel-files">{fileRows(fileList.filter(f => f.name.toLowerCase().includes(query.toLowerCase()) || f.content.toLowerCase().includes(query.toLowerCase())))}</div></>}
@@ -308,7 +312,7 @@ export function CodeWorkspace() {
      {view === 'settings' && <><h1>Editor settings</h1><p className="description">Small details. A better flow.</p><div className="preference-row"><div>Auto indent<p>Keep every line in its place.</p></div><Button variant="ghost" role="switch" aria-checked={autoIndent} aria-label="Auto indent" className={`toggle ${autoIndent ? 'on' : ''}`} onClick={() => setAutoIndent(!autoIndent)}><span className="toggle-knob" /></Button></div><div className="preference-row"><div>Word wrap<p>Fit long lines within the editor.</p></div><Button variant="ghost" role="switch" aria-checked={wrap} aria-label="Word wrap" className={`toggle ${wrap ? 'on' : ''}`} onClick={() => setWrap(!wrap)}><span className="toggle-knob" /></Button></div><div className="preference-row"><span>Language</span><select aria-label="Settings language" className="language-select" value={language} onChange={e => setLanguage(e.target.value)}>{languages.map(l => <option key={l}>{l}</option>)}</select></div><div className="shortcut-list"><span className="eyebrow">KEYBOARD SHORTCUTS</span>{[['Save file', 'Ctrl + S'], ['Command palette', 'Ctrl + K'], ['Toggle terminal', 'Ctrl + `'], ['Outdent', 'Shift + Tab']].map(([label, key]) => <div className="shortcut-entry" key={label}><span>{label}</span><kbd>{key}</kbd></div>)}</div></>}
      {view === 'preview' && <><div className="flex items-center justify-between"><span className="eyebrow">PREVIEW · SANDBOX</span><div className="flex"><IconButton label="Reload preview" onClick={() => { setLogs([]); setProblems([]); setPreviewKey(k => k + 1); }}><RefreshCw /></IconButton><IconButton label="Back to code" onClick={() => setView('editor')}><X /></IconButton></div></div>{previewDoc ? <iframe key={previewKey} ref={frameRef} title="Preview" sandbox="allow-scripts" srcDoc={previewDoc} className="mt-3 h-[60vh] min-h-[300px] w-full rounded-lg border border-border bg-white" /> : <p className="description mt-4">Tidak ada file HTML. Buat index.html dulu.</p>}</>}
     </div>}
-    {terminalOpen && <section className="terminal" aria-label="Terminal panel"><div className="terminal-header"><div className="terminal-tabs">{['Terminal', 'Output', 'Problems'].map(tab => <Button key={tab} variant="ghost" className={`terminal-tab ${terminalTab === tab ? 'active' : ''}`} onClick={() => setTerminalTab(tab)}>{tab}{tab === 'Problems' && <span className="count">{problems.length}</span>}</Button>)}</div><div className="terminal-tools"><span className="shell-name"><Terminal size={12} />zsh</span><IconButton label="New terminal" onClick={() => { setTerm(INITIAL_TERM); setTerminalTab('Terminal'); }}><Plus /></IconButton><IconButton label="Clear terminal" onClick={() => { setTerm([]); setLogs([]); setProblems([]); }}><Trash2 /></IconButton><IconButton label="Close terminal" onClick={() => setTerminalOpen(false)}><X /></IconButton></div></div><div className="terminal-body" ref={termRef}>{terminalTab === 'Terminal' ? <>{term.map((l, i) => l.kind === 'in' ? <p key={i}><span className="text-primary">➜</span> <span className="syntax-number">bloom-project</span> {l.text}</p> : <p key={i} className={`whitespace-pre-wrap break-words ${l.kind === 'err' ? 'text-destructive' : 'terminal-muted'}`}>{l.text}</p>)}<p><span className="text-primary">➜</span> <span className="syntax-number">bloom-project</span> <input aria-label="Terminal command" className="terminal-input" value={command} onChange={e => setCommand(e.target.value)} onKeyDown={onTerminalKey} placeholder="▍" spellCheck={false} autoCapitalize="off" autoCorrect="off" /></p></> : terminalTab === 'Problems' ? (problems.length ? problems.map((p, i) => <p key={i} className="text-destructive whitespace-pre-wrap break-words">✖ {p}</p>) : <p className="terminal-muted">No problems detected.</p>) : (logs.length ? logs.map((l, i) => <p key={i} className="terminal-muted whitespace-pre-wrap break-words">{l}</p>) : <p className="terminal-muted">[kode] Belum ada output. Tekan Run atau jalankan `node script.js`.</p>)}</div></section>}
+    {terminalOpen && <section className="terminal" aria-label="Terminal panel"><div className="terminal-header"><div className="terminal-tabs">{['Terminal', 'Output', 'Problems'].map(tab => <Button key={tab} variant="ghost" className={`terminal-tab ${terminalTab === tab ? 'active' : ''}`} onClick={() => setTerminalTab(tab)}>{tab}{tab === 'Problems' && <span className="count">{problems.length}</span>}</Button>)}</div><div className="terminal-tools"><span className="shell-name"><Terminal size={12} />zsh</span><IconButton label="New terminal" onClick={() => { setTerm(INITIAL_TERM); setTerminalTab('Terminal'); }}><Plus /></IconButton><IconButton label="Clear terminal" onClick={() => { setTerm([]); setLogs([]); setProblems([]); }}><Trash2 /></IconButton><IconButton label="Close terminal" onClick={() => setTerminalOpen(false)}><X /></IconButton></div></div><div className="terminal-body" ref={termRef}>{terminalTab === 'Terminal' ? <>{term.map((l, i) => l.kind === 'in' ? <p key={i}><span className="text-primary">➜</span> <span className="syntax-number">bloom-project</span> {l.text}</p> : <p key={i} className={`whitespace-pre-wrap break-words ${l.kind === 'err' ? 'text-destructive' : 'terminal-muted'}`}>{l.text}</p>)}<form onSubmit={e => { e.preventDefault(); submitCommand(); }}><span className="text-primary">➜</span> <span className="syntax-number">bloom-project</span> <input aria-label="Terminal command" className="terminal-input" value={command} onChange={e => setCommand(e.target.value)} onKeyDown={onTerminalKey} placeholder="▍" enterKeyHint="send" spellCheck={false} autoCapitalize="off" autoCorrect="off" autoComplete="off" /></form></> : terminalTab === 'Problems' ? (problems.length ? problems.map((p, i) => <p key={i} className="text-destructive whitespace-pre-wrap break-words">✖ {p}</p>) : <p className="terminal-muted">No problems detected.</p>) : (logs.length ? logs.map((l, i) => <p key={i} className="terminal-muted whitespace-pre-wrap break-words">{l}</p>) : <p className="terminal-muted">[kode] Belum ada output. Tekan Run atau jalankan `node script.js`.</p>)}</div></section>}
    </main>
   </div>
   <footer className="statusbar"><div className="status-group"><span className="status-item"><GitBranch />main{dirty.size ? '*' : ''}</span><span className="status-item"><CircleX />{problems.length} <CircleAlert />0</span><span className="desktop-only status-item"><Check />{activeFile && dirty.has(activeFile.name) ? 'Unsaved' : 'Saved'}</span></div><div className="status-group"><span>Ln {cursor.ln}, Col {cursor.col}</span><span className="desktop-only">Spaces: 2</span><span className="desktop-only">UTF-8</span><select className="language-select" aria-label="Code language" value={language} onChange={e => setLanguage(e.target.value)}>{[...languages, 'Markdown', 'JSON', 'Text'].map(l => <option key={l}>{l}</option>)}</select><span className="status-item text-primary"><Check /><span className="desktop-only">Prettier</span></span></div></footer>
